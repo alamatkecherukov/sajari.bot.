@@ -1,6 +1,4 @@
-flask
-flask-cors
+aiohttp
 aiogram
 reportlab
 python-docx
-gunicorn

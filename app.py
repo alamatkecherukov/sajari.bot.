@@ -17,7 +17,14 @@ from reportlab.pdfgen import canvas
 
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА")
+BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Переменная окружения TELEGRAM_TOKEN не задана. "
+        "Добавь её в настройках Render (Environment Variables)."
+    )
+
+MASTER_CHAT_ID = int(os.environ.get("MASTER_CHAT_ID", 6897048593))
 SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:5000")
 # =======================
 
@@ -29,7 +36,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 bot_loop: asyncio.AbstractEventLoop | None = None
-MASTER_CHAT_ID: int | None = None
 
 
 # ====== Генерация PDF ======
@@ -81,22 +87,14 @@ def docx_to_text(path: str) -> str:
 # ====== Хендлер бота ======
 @dp.message(CommandStart())
 async def start(message: Message):
-    global MASTER_CHAT_ID
-    if MASTER_CHAT_ID is None:
-        MASTER_CHAT_ID = message.from_user.id
-        await message.answer(
-            "Ты назначен мастером. Все заказы с сайта будут приходить сюда."
-        )
+    if message.from_user.id == MASTER_CHAT_ID:
+        await message.answer("Ты мастер. Все заказы с сайта будут приходить сюда.")
     else:
-        await message.answer("Бот уже активен.")
+        await message.answer("Этот бот принимает заказы только для мастера.")
 
 
 # ====== Отправка заказа ======
 async def send_to_master(pdf_buffer: BytesIO, filename: str, client_info: str):
-    if not MASTER_CHAT_ID:
-        print("Мастер ещё не написал /start — отправить некуда.")
-        return
-
     await bot.send_document(
         MASTER_CHAT_ID,
         BufferedInputFile(pdf_buffer.getvalue(), filename=filename),

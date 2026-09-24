@@ -1,15 +1,12 @@
 import os
 import asyncio
-import threading
 from io import BytesIO
-from urllib.request import urlopen
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import BufferedInputFile, Message
 from aiogram.filters import CommandStart
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from docx import Document
 from reportlab.lib.pagesizes import A4
@@ -19,23 +16,17 @@ from reportlab.pdfgen import canvas
 # ====== НАСТРОЙКИ ======
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError(
-        "Переменная окружения TELEGRAM_TOKEN не задана. "
-        "Добавь её в настройках Render (Environment Variables)."
-    )
+    raise RuntimeError("Переменная TELEGRAM_TOKEN не задана.")
 
 MASTER_CHAT_ID = int(os.environ.get("MASTER_CHAT_ID", 6897048593))
-SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:5000")
+SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:10000")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{SELF_URL}{WEBHOOK_PATH}"
 # =======================
 
 
-app = Flask(__name__)
-CORS(app)
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-bot_loop: asyncio.AbstractEventLoop | None = None
 
 
 # ====== Генерация PDF ======
@@ -93,86 +84,84 @@ async def start(message: Message):
         await message.answer("Этот бот принимает заказы только для мастера.")
 
 
-# ====== Отправка заказа ======
-async def send_to_master(pdf_buffer: BytesIO, filename: str, client_info: str):
-    await bot.send_document(
-        MASTER_CHAT_ID,
-        BufferedInputFile(pdf_buffer.getvalue(), filename=filename),
-        caption=f"Новый заказ\n{client_info}"
-    )
-
-
 # ====== Эндпоинт для сайта ======
-@app.route("/api/order", methods=["POST"])
-def order():
-    client_info = request.form.get("client", "Клиент без имени")
-    text = request.form.get("content", "").strip()
-    file = request.files.get("file")
+async def handle_order(request: web.Request) -> web.Response:
+    reader = await request.multipart()
+
+    client_info = "Клиент без имени"
+    text = ""
+    file_bytes = None
+    file_name = None
+
+    async for part in reader:
+        if part.name == "client":
+            client_info = (await part.text()).strip() or client_info
+        elif part.name == "content":
+            text = (await part.text()).strip()
+        elif part.name == "file":
+            file_name = part.filename
+            file_bytes = await part.read()
 
     filename = "order.pdf"
 
-    if file and file.filename.lower().endswith(".docx"):
-        tmp_path = f"tmp_{file.filename}"
-        file.save(tmp_path)
+    if file_bytes and file_name and file_name.lower().endswith(".docx"):
+        tmp_path = f"tmp_{file_name}"
+        with open(tmp_path, "wb") as f:
+            f.write(file_bytes)
         try:
             text = docx_to_text(tmp_path)
         finally:
             os.remove(tmp_path)
-        filename = file.filename.rsplit(".", 1)[0] + ".pdf"
+        filename = file_name.rsplit(".", 1)[0] + ".pdf"
 
     if not text:
-        return jsonify({"ok": False, "error": "Пустой заказ"}), 400
+        return web.json_response({"ok": False, "error": "Пустой заказ"}, status=400)
 
     pdf_buffer = text_to_pdf(text)
 
-    if bot_loop is None:
-        return jsonify({"ok": False, "error": "Бот не запущен"}), 500
-
-    future = asyncio.run_coroutine_threadsafe(
-        send_to_master(pdf_buffer, filename, client_info),
-        bot_loop
-    )
     try:
-        future.result(timeout=30)
+        await bot.send_document(
+            MASTER_CHAT_ID,
+            BufferedInputFile(pdf_buffer.getvalue(), filename=filename),
+            caption=f"Новый заказ\n{client_info}"
+        )
     except Exception as e:
         print("Ошибка отправки:", e)
-        return jsonify({"ok": False, "error": "Не удалось отправить в Telegram"}), 500
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
-    return jsonify({"ok": True})
-
-
-@app.route("/health")
-def health():
-    return "OK", 200
+    return web.json_response({"ok": True})
 
 
-def keep_alive():
-    import time
-    time.sleep(60)
-    while True:
-        try:
-            urlopen(f"{SELF_URL}/health", timeout=10)
-            print("Keep-alive OK")
-        except Exception as e:
-            print("Keep-alive failed:", e)
-        time.sleep(14 * 60)
+async def handle_health(request: web.Request) -> web.Response:
+    return web.Response(text="OK")
 
 
-async def run_bot():
-    global bot_loop
-    bot_loop = asyncio.get_running_loop()
-    await dp.start_polling(bot)
+async def on_startup(app: web.Application):
+    await bot.set_webhook(WEBHOOK_URL)
+    print(f"Webhook установлен: {WEBHOOK_URL}")
 
 
-def start_bot_thread():
-    asyncio.run(run_bot())
+async def on_shutdown(app: web.Application):
+    await bot.delete_webhook()
+    await bot.session.close()
 
 
-# ====== Запуск при импорте (для gunicorn) ======
-threading.Thread(target=start_bot_thread, daemon=True).start()
-threading.Thread(target=keep_alive, daemon=True).start()
+def create_app() -> web.Application:
+    app = web.Application()
+
+    # Webhook для бота
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
+    # Эндпоинты для сайта
+    app.router.add_post("/api/order", handle_order)
+    app.router.add_get("/health", handle_health)
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(create_app(), host="0.0.0.0", port=port)

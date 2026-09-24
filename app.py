@@ -151,7 +151,8 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 # ====== CORS ======
-async def cors_middleware(request: web.Request, handler):
+@web.middleware
+async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
         response = web.Response()
     else:

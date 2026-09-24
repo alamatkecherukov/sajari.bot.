@@ -11,6 +11,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from docx import Document
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 # ====== НАСТРОЙКИ ======
@@ -25,11 +27,23 @@ WEBHOOK_URL = f"{SELF_URL}{WEBHOOK_PATH}"
 # =======================
 
 
+# ====== ШРИФТ ======
+FONT_PATH = os.path.join(os.path.dirname(__file__), "PTSerif-Regular.ttf")
+if os.path.exists(FONT_PATH):
+    pdfmetrics.registerFont(TTFont("PT", FONT_PATH))
+    FONT_NAME = "PT"
+    print(f"Шрифт загружен: {FONT_PATH}")
+else:
+    FONT_NAME = "Helvetica"
+    print(f"ВНИМАНИЕ: {FONT_PATH} не найден, используется Helvetica (кириллица не поддерживается)")
+
+
+# ====== БОТ ======
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
-# ====== Генерация PDF ======
+# ====== ГЕНЕРАЦИЯ PDF ======
 def text_to_pdf(text: str) -> BytesIO:
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -40,7 +54,7 @@ def text_to_pdf(text: str) -> BytesIO:
     line_height = 18
     max_width = width - 100
 
-    c.setFont("Helvetica", 11)
+    c.setFont(FONT_NAME, 11)
 
     y = margin_top
     for paragraph in text.split("\n"):
@@ -48,7 +62,7 @@ def text_to_pdf(text: str) -> BytesIO:
         line = ""
         for word in words:
             test = line + word + " "
-            if c.stringWidth(test, "Helvetica", 11) < max_width:
+            if c.stringWidth(test, FONT_NAME, 11) < max_width:
                 line = test
             else:
                 c.drawString(margin_left, y, line.strip())
@@ -56,13 +70,13 @@ def text_to_pdf(text: str) -> BytesIO:
                 line = word + " "
                 if y < 60:
                     c.showPage()
-                    c.setFont("Helvetica", 11)
+                    c.setFont(FONT_NAME, 11)
                     y = margin_top
         c.drawString(margin_left, y, line.strip())
         y -= line_height
         if y < 60:
             c.showPage()
-            c.setFont("Helvetica", 11)
+            c.setFont(FONT_NAME, 11)
             y = margin_top
 
     c.save()
@@ -75,7 +89,7 @@ def docx_to_text(path: str) -> str:
     return "\n".join(p.text for p in doc.paragraphs)
 
 
-# ====== Хендлер бота ======
+# ====== ХЕНДЛЕР БОТА ======
 @dp.message(CommandStart())
 async def start(message: Message):
     if message.from_user.id == MASTER_CHAT_ID:
@@ -84,7 +98,7 @@ async def start(message: Message):
         await message.answer("Этот бот принимает заказы только для мастера.")
 
 
-# ====== Эндпоинт для сайта ======
+# ====== ЭНДПОИНТ ДЛЯ САЙТА ======
 async def handle_order(request: web.Request) -> web.Response:
     reader = await request.multipart()
 
@@ -136,6 +150,23 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.Response(text="OK")
 
 
+# ====== CORS ======
+async def cors_middleware(request: web.Request, handler):
+    if request.method == "OPTIONS":
+        response = web.Response()
+    else:
+        try:
+            response = await handler(request)
+        except web.HTTPException as ex:
+            response = ex
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
+# ====== ЗАПУСК И ОСТАНОВКА ======
 async def on_startup(app: web.Application):
     await bot.set_webhook(WEBHOOK_URL)
     print(f"Webhook установлен: {WEBHOOK_URL}")
@@ -147,13 +178,11 @@ async def on_shutdown(app: web.Application):
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
 
-    # Webhook для бота
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 
-    # Эндпоинты для сайта
     app.router.add_post("/api/order", handle_order)
     app.router.add_get("/health", handle_health)
 

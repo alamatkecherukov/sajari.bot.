@@ -1,0 +1,6 @@
+flask
+flask-cors
+aiogram
+reportlab
+python-docx
+gunicorn

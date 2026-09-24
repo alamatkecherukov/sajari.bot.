@@ -100,71 +100,66 @@ async def start(message: Message):
 
 # ====== ЭНДПОИНТ ДЛЯ САЙТА ======
 async def handle_order(request: web.Request) -> web.Response:
-    reader = await request.multipart()
+    # CORS-заголовки для ответа
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
 
-    client_info = "Клиент без имени"
-    text = ""
-    file_bytes = None
-    file_name = None
-
-    async for part in reader:
-        if part.name == "client":
-            client_info = (await part.text()).strip() or client_info
-        elif part.name == "content":
-            text = (await part.text()).strip()
-        elif part.name == "file":
-            file_name = part.filename
-            file_bytes = await part.read()
-
-    filename = "order.pdf"
-
-    if file_bytes and file_name and file_name.lower().endswith(".docx"):
-        tmp_path = f"tmp_{file_name}"
-        with open(tmp_path, "wb") as f:
-            f.write(file_bytes)
-        try:
-            text = docx_to_text(tmp_path)
-        finally:
-            os.remove(tmp_path)
-        filename = file_name.rsplit(".", 1)[0] + ".pdf"
-
-    if not text:
-        return web.json_response({"ok": False, "error": "Пустой заказ"}, status=400)
-
-    pdf_buffer = text_to_pdf(text)
+    # Если это preflight-запрос от браузера
+    if request.method == "OPTIONS":
+        return web.Response(headers=headers)
 
     try:
+        reader = await request.multipart()
+
+        client_info = "Клиент без имени"
+        text = ""
+        file_bytes = None
+        file_name = None
+
+        async for part in reader:
+            if part.name == "client":
+                client_info = (await part.text()).strip() or client_info
+            elif part.name == "content":
+                text = (await part.text()).strip()
+            elif part.name == "file":
+                file_name = part.filename
+                file_bytes = await part.read()
+
+        filename = "order.pdf"
+
+        if file_bytes and file_name and file_name.lower().endswith(".docx"):
+            tmp_path = f"tmp_{file_name}"
+            with open(tmp_path, "wb") as f:
+                f.write(file_bytes)
+            try:
+                text = docx_to_text(tmp_path)
+            finally:
+                os.remove(tmp_path)
+            filename = file_name.rsplit(".", 1)[0] + ".pdf"
+
+        if not text:
+            return web.json_response({"ok": False, "error": "Пустой заказ"}, status=400, headers=headers)
+
+        pdf_buffer = text_to_pdf(text)
+
         await bot.send_document(
             MASTER_CHAT_ID,
             BufferedInputFile(pdf_buffer.getvalue(), filename=filename),
             caption=f"Новый заказ\n{client_info}"
         )
-    except Exception as e:
-        print("Ошибка отправки:", e)
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
-    return web.json_response({"ok": True})
+        return web.json_response({"ok": True}, headers=headers)
+
+    except Exception as e:
+        print("Ошибка обработки заказа:", e)
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers=headers)
 
 
 async def handle_health(request: web.Request) -> web.Response:
     return web.Response(text="OK")
-
-
-# ====== CORS ======
-@web.middleware
-async def cors_middleware(request, handler):
-    if request.method == "OPTIONS":
-        response = web.Response()
-    else:
-        try:
-            response = await handler(request)
-        except web.HTTPException as ex:
-            response = ex
-
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return response
 
 
 # ====== ЗАПУСК И ОСТАНОВКА ======
@@ -179,12 +174,15 @@ async def on_shutdown(app: web.Application):
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[cors_middleware])
+    app = web.Application()
 
+    # Webhook для бота
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 
+    # Эндпоинты для сайта (CORS обрабатываем прямо в хендлерах)
     app.router.add_post("/api/order", handle_order)
+    app.router.add_options("/api/order", handle_order)  # для preflight
     app.router.add_get("/health", handle_health)
 
     app.on_startup.append(on_startup)
